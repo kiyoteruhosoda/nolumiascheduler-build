@@ -1,0 +1,167 @@
+# NolumiaScheduler（Windows）を GitHub の Windows 環境で組み、インストーラを Release に置く（nolumiatask #551）。
+#
+# ⚠ 使い捨ての置き場。消えてもアプリの正本（forge kyon/NolumiaScheduler）には響かない
+#   （持ち主 2026-10-20「アクションを git 管理しないでいいよ。なくなっていい前提」）。
+#   NolumiaScheduler の ADR-0007 に経緯がある。
+# 流れ:
+#   1. 15 分ごとに公開の写し kiyoteruhosoda/NolumiaScheduler の main の先頭を見る
+#      （写しは forge へ push されると追いかける）。組んだ印（タグ build-<sha>）か
+#      失敗の印（failed-<sha>）があれば何もしない
+#   2. Windows で画面（WinUI）ごと組み、Velopack で Setup.exe と更新の一式を作る
+#   3. この置き場の Release（タグ build-<sha>）に置く。古い Release は消す
+#   4. 家の側（forge kyon/nolumiascheduler-build）が Release を取りに来て share.nolumia.com へ上げる
+#      ——家の置き場は外から書けないので、こちらは書く鍵を持たない
+#   失敗したら ntfy に知らせ、同じ commit は手で押すまで組み直さない。
+name: build
+
+on:
+  schedule:
+    - cron: "7,22,37,52 * * * *"
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "組む commit（空なら main の先頭）"
+        required: false
+        default: ""
+      fail:
+        description: "わざと失敗させる（知らせの確かめ）"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPO: kiyoteruhosoda/NolumiaScheduler
+
+jobs:
+  check:
+    name: 組むか決める
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.pick.outputs.sha }}
+      build: ${{ steps.pick.outputs.build }}
+    steps:
+      - name: 組む commit を決める
+        id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_SHA: ${{ inputs.sha }}
+        run: |
+          # 60 日動きが無いと定期の起動が止められるので、毎回「有効にする」を叩いて伸ばす。
+          gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/build.yml/enable" || true
+          sha="$INPUT_SHA"
+          if [ -z "$sha" ]; then
+            sha=$(git ls-remote "https://github.com/$SOURCE_REPO" refs/heads/main | cut -f1)
+          fi
+          [ -n "$sha" ] || { echo "main の先頭を読めませんでした"; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          for t in "build-$sha" "failed-$sha"; do
+            if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$t" >/dev/null 2>&1; then
+              echo "$t がある。組まない"
+              echo "build=false" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+          done
+          echo "build=true" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: 組む（Windows）
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      SHA: ${{ needs.check.outputs.sha }}
+      DOTNET_NOLOGO: "1"
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+    steps:
+      - name: わざと失敗させる
+        if: inputs.fail
+        run: |
+          echo "知らせの確かめのため、わざと失敗させます。"
+          exit 1
+
+      - uses: actions/checkout@v6
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ env.SHA }}
+          fetch-depth: 0
+          path: src
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: src/global.json
+
+      # 版は WinTrack と同じ形（1.0.<commit の数>）。Velopack は版が上がったときだけ更新する。
+      - name: 版を決める
+        run: echo "VERSION=1.0.$(git -C src rev-list --count HEAD)" >> "$GITHUB_ENV"
+
+      - name: 組む（画面ごと）
+        run: >-
+          dotnet publish src/NolumiaScheduler.WinUI/NolumiaScheduler.WinUI.csproj
+          -c Release -r win-x64 -p:Platform=x64 -p:Version="$VERSION" -o publish
+
+      - name: インストーラを作る（Velopack）
+        run: |
+          dotnet tool install --tool-path tools vpk --version 1.2.158
+          tools/vpk pack \
+            --packId NolumiaScheduler \
+            --packVersion "$VERSION" \
+            --packDir publish \
+            --mainExe NolumiaScheduler.WinUI.exe \
+            --packTitle NolumiaScheduler \
+            --packAuthors Nolumia \
+            --icon src/NolumiaScheduler.WinUI/Assets/app.ico \
+            --noPortable \
+            --outputDir Releases
+          (cd Releases && sha256sum * > SHA256SUMS)
+          ls -la Releases
+
+      - name: Release に置く
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          printf 'source: https://github.com/%s/commit/%s\nversion: %s\n' "$SOURCE_REPO" "$SHA" "$VERSION" > notes.txt
+          gh release create "build-$SHA" Releases/* -R "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --title "NolumiaScheduler $VERSION" --notes-file notes.txt
+          # 置き場を食わないよう、いまのもの以外は消す（家の側は最新だけを取りに来る）。
+          gh release list -R "$GITHUB_REPOSITORY" --limit 100 --json tagName -q '.[].tagName' \
+            | grep -vx "build-$SHA" \
+            | while read -r t; do gh release delete "$t" -R "$GITHUB_REPOSITORY" --cleanup-tag -y; done
+
+  notify:
+    name: 失敗を知らせる
+    needs: [check, build]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: ntfy へ
+        env:
+          NTFY_URL: ${{ secrets.NTFY_URL }}
+          SHA: ${{ needs.check.outputs.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # 文面は host/lib/notify.py の Notice の型（見出し・対象：状態・確認先）。題は ASCII。
+          body=$(printf '【異常】NolumiaScheduler（Windows）のビルドが失敗しました\n・ビルド：失敗\n  - commit: %s\n確認先\n・%s\n' "${SHA:0:7}" "$RUN_URL")
+          curl -fsS -H "Title: nolumia scheduler-build" -H "Priority: high" -d "$body" "$NTFY_URL" >/dev/null
+          echo "知らせました"
+
+      - name: 同じ commit を組み直さない印
+        if: needs.check.outputs.sha != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.check.outputs.sha }}
+        run: |
+          gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/tags/failed-$SHA" -f sha="$GITHUB_SHA" >/dev/null || true
