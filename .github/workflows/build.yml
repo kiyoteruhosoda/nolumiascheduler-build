@@ -57,8 +57,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           INPUT_SHA: ${{ inputs.sha }}
         run: |
-          # 60 日動きが無いと定期の起動が止められるので、毎回「有効にする」を叩いて伸ばす。
-          gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/build.yml/enable" || true
+          # 60 日動きが無いと定期の起動が止められるので、月に 1 度「有効にする」を叩いて伸ばす
+          # （毎回叩くと定期の登録が組み直されて起動が来なくなる疑いがあるので、月初の 0 時台だけ）。
+          if [ "$GITHUB_EVENT_NAME" = schedule ] && [ "$(date -u +%d%H)" = "0100" ]; then
+            gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/build.yml/enable" || true
+          fi
           sha="$INPUT_SHA"
           if [ -z "$sha" ]; then
             sha=$(git ls-remote "https://github.com/$SOURCE_REPO" refs/heads/main | cut -f1)
