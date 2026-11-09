@@ -12,7 +12,8 @@
 #   3. この置き場の Release（タグ build-<sha>）に置く。古い Release は消す
 #   4. 家の側（forge kyon/nolumiascheduler-build）が Release を取りに来て share.nolumia.com へ上げる
 #      ——家の置き場は外から書けないので、こちらは書く鍵を持たない
-#   失敗したら ntfy に知らせ、同じ commit は手で押すまで組み直さない。
+#   失敗したら failed-<sha> の印を付け、同じ commit は手で押すまで組み直さない。知らせは家の側（forge の取り込み係）が
+#   その印を見て notice へ送る（task #940。ここは鍵を持たない）。
 name: build
 
 on:
@@ -162,22 +163,11 @@ jobs:
             | while read -r t; do gh release delete "$t" -R "$GITHUB_REPOSITORY" --cleanup-tag -y; done
 
   notify:
-    name: 失敗を知らせる
+    name: 失敗の印を付ける
     needs: [check, build]
     if: failure()
     runs-on: ubuntu-latest
     steps:
-      - name: ntfy へ
-        env:
-          NTFY_URL: ${{ secrets.NTFY_URL }}
-          SHA: ${{ needs.check.outputs.sha }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          # 文面は host/lib/notify.py の Notice の型（見出し・対象：状態・確認先）。題は ASCII。
-          body=$(printf '【異常】NolumiaScheduler（Windows）のビルドが失敗しました\n・ビルド：失敗\n  - commit: %s\n確認先\n・%s\n' "${SHA:0:7}" "$RUN_URL")
-          curl -fsS -H "Title: nolumia scheduler-build" -H "Priority: high" -d "$body" "$NTFY_URL" >/dev/null
-          echo "知らせました"
-
       - name: 同じ commit を組み直さない印
         if: needs.check.outputs.sha != ''
         env:
