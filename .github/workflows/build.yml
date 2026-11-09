@@ -7,7 +7,8 @@
 #   1. 15 分ごとに公開の写し kiyoteruhosoda/NolumiaScheduler の main の先頭を見る
 #      （写しは forge へ push されると追いかける）。組んだ印（タグ build-<sha>）か
 #      失敗の印（failed-<sha>）があれば何もしない
-#   2. Windows で画面（WinUI）ごと組み、Velopack で Setup.exe と更新の一式を作る
+#   2. Windows で画面（WinUI）ごと組み、Velopack で Setup.exe・Portable.zip と更新の一式を作る
+#      （持ち主は Portable を使う。どちらも家の側が zip で share.nolumia.com の files へ置く。task #937）
 #   3. この置き場の Release（タグ build-<sha>）に置く。古い Release は消す
 #   4. 家の側（forge kyon/nolumiascheduler-build）が Release を取りに来て share.nolumia.com へ上げる
 #      ——家の置き場は外から書けないので、こちらは書く鍵を持たない
@@ -135,7 +136,6 @@ jobs:
             --packTitle NolumiaScheduler \
             --packAuthors Nolumia \
             --icon src/NolumiaScheduler.WinUI/Assets/app.ico \
-            --noPortable \
             --outputDir Releases
           (cd Releases && sha256sum * > SHA256SUMS)
           ls -la Releases
